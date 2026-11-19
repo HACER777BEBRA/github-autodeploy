@@ -1,0 +1,207 @@
+name: Autodeploy
+
+on:
+  workflow_call:
+    inputs:
+      autodeploy_repository:
+        description: "owner/name этого репозитория: из него берутся скрипты выкладки"
+        type: string
+        required: true
+      autodeploy_ref:
+        type: string
+        default: main
+      app_name:
+        description: "Имя контейнера и каталога на сервере ($HOME/<app_name>)"
+        type: string
+        required: true
+      app_label:
+        description: "Имя в уведомлении; пусто — без имени"
+        type: string
+        default: ""
+      deploy_branch:
+        type: string
+        default: main
+      image_name:
+        description: "Пусто — ghcr.io/<owner>/<repo>"
+        type: string
+        default: ""
+      dockerfile:
+        type: string
+        default: Dockerfile
+      build_context:
+        type: string
+        default: "."
+      compose_file:
+        type: string
+        default: docker-compose.prod.yml
+      python_version:
+        type: string
+        default: "3.13"
+      test_command:
+        description: "Пусто — без тестов"
+        type: string
+        default: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+          ruff check .
+          pytest tests/ -v --tb=short
+      env_keys:
+        description: "Имена секретов, которые попадут в .env на сервере"
+        type: string
+        required: true
+      required_env_keys:
+        type: string
+        default: ""
+      writable_dirs:
+        description: "Каталоги внутри $HOME/<app_name>, которые отдаются пользователю SSH"
+        type: string
+        default: ""
+      ready_markers:
+        description: "Строки лога, по одной на строку; пусто — ждать healthy/running"
+        type: string
+        default: ""
+      ready_timeout:
+        type: number
+        default: 90
+      log_mask_regex:
+        type: string
+        default: ""
+      post_deploy_script:
+        description: "Скрипт из репозитория приложения, запускается после выкладки"
+        type: string
+        default: ""
+      notify_token_secret:
+        type: string
+        default: BOT_TOKEN
+      notify_chat_secret:
+        type: string
+        default: LOG_CHAT_ID
+
+jobs:
+  test:
+    name: Run Tests
+    if: inputs.test_command != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ inputs.python_version }}
+      - name: Run tests
+        env:
+          TEST_COMMAND: ${{ inputs.test_command }}
+        run: bash -euo pipefail -c "$TEST_COMMAND"
+
+  build-and-push:
+    name: Build and Push Docker Image
+    needs: test
+    if: >-
+      !cancelled()
+      && contains(fromJSON('["success","skipped"]'), needs.test.result)
+      && github.event_name == 'push'
+      && github.ref == format('refs/heads/{0}', inputs.deploy_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        id: push
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          BUILD_CONTEXT: ${{ inputs.build_context }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          image="${IMAGE_NAME:-ghcr.io/${REPOSITORY}}"
+          image="${image,,}"
+          docker build -f "$DOCKERFILE" -t "${image}:${SHA}" "$BUILD_CONTEXT"
+          docker push "${image}:${SHA}"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${image}:${SHA}")"
+          case "$digest" in
+            *@sha256:*) ;;
+            *) echo "Image digest was not published" >&2; exit 1 ;;
+          esac
+          echo "image=${image}@${digest#*@}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy to Server
+    needs: [test, build-and-push]
+    if: "!cancelled() && needs.build-and-push.result == 'success'"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.autodeploy_repository }}
+          ref: ${{ inputs.autodeploy_ref }}
+          token: ${{ secrets.AUTODEPLOY_TOKEN || github.token }}
+          path: .autodeploy
+      - name: Deploy via SSH
+        env:
+          SECRETS_JSON: ${{ toJSON(secrets) }}
+          APP_NAME: ${{ inputs.app_name }}
+          NEW_IMAGE: ${{ needs.build-and-push.outputs.image }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USERNAME: ${{ github.repository_owner }}
+          COMPOSE_FILE: ${{ inputs.compose_file }}
+          ENV_KEYS: ${{ inputs.env_keys }}
+          REQUIRED_ENV_KEYS: ${{ inputs.required_env_keys }}
+          WRITABLE_DIRS: ${{ inputs.writable_dirs }}
+          READY_MARKERS: ${{ inputs.ready_markers }}
+          READY_TIMEOUT: ${{ inputs.ready_timeout }}
+          LOG_MASK_REGEX: ${{ inputs.log_mask_regex }}
+          POST_DEPLOY_SCRIPT: ${{ inputs.post_deploy_script }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST_FINGERPRINT: ${{ secrets.SSH_HOST_FINGERPRINT }}
+        run: bash .autodeploy/scripts/push_remote.sh
+
+  notify:
+    name: Send Telegram Notification
+    needs: [test, build-and-push, deploy]
+    if: >-
+      always()
+      && github.event_name == 'push'
+      && github.ref == format('refs/heads/{0}', inputs.deploy_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.autodeploy_repository }}
+          ref: ${{ inputs.autodeploy_ref }}
+          token: ${{ secrets.AUTODEPLOY_TOKEN || github.token }}
+          path: .autodeploy
+      - name: Send notification
+        env:
+          NOTIFY_TOKEN: ${{ secrets[inputs.notify_token_secret] }}
+          NOTIFY_CHAT_ID: ${{ secrets[inputs.notify_chat_secret] }}
+          APP_LABEL: ${{ inputs.app_label }}
+          TEST_STATUS: ${{ needs.test.result == 'skipped' && 'success' || needs.test.result }}
+          BUILD_STATUS: ${{ needs.build-and-push.result }}
+          DEPLOY_STATUS: ${{ needs.deploy.result }}
+          COMMIT_SHA: ${{ github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          WORKFLOW_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .autodeploy/scripts/notify.sh

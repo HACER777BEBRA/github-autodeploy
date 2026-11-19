@@ -1,0 +1,28 @@
+# .github/workflows/deploy.yml в репозитории real-estate-client-bot.
+# OWNER — владелец репозитория github-autodeploy на GitHub.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  autodeploy:
+    uses: OWNER/github-autodeploy/.github/workflows/deploy.yml@main
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+    with:
+      autodeploy_repository: OWNER/github-autodeploy
+      app_name: real-estate-client-bot
+      env_keys: BOT_TOKEN LOG_CHAT_ID ADMIN_IDS OPENROUTER_API_KEY OPENROUTER_MODEL DATABASE_URL
+      required_env_keys: BOT_TOKEN LOG_CHAT_ID DATABASE_URL
+      writable_dirs: logs data/cards
+      ready_markers: |
+        База данных подтянулась
+        Бот запущен
+      log_mask_regex: "chat_id=-?[0-9]+"
+      post_deploy_script: scripts/deploy/sync_grafana.sh
