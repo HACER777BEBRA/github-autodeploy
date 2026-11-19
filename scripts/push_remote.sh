@@ -24,8 +24,19 @@ case "$NEW_IMAGE" in
     exit 1
     ;;
 esac
+server_port="${SERVER_PORT:-22}"
+case "$server_port" in
+  ''|*[!0-9]*)
+    echo "SERVER_PORT must be a number" >&2
+    exit 1
+    ;;
+esac
 if [ ! -f "$COMPOSE_FILE" ]; then
   echo "Compose file not found: $COMPOSE_FILE" >&2
+  exit 1
+fi
+if [ -n "${POST_DEPLOY_SCRIPT:-}" ] && [ ! -f "$POST_DEPLOY_SCRIPT" ]; then
+  echo "Post-deploy script not found: $POST_DEPLOY_SCRIPT" >&2
   exit 1
 fi
 
@@ -39,8 +50,13 @@ known_hosts="$ssh_dir/known_hosts"
 printf '%s\n' "$SSH_PRIVATE_KEY" > "$key_file"
 : > "$known_hosts"
 
+PYTHONPATH="$tools_dir" python3 -m autodeploy.env_bundle "$bundle"
+cp "$COMPOSE_FILE" "$bundle/docker-compose.prod.yml"
+# Дальше секреты нужны только в файлах; дочерним процессам они не достаются.
+unset SECRETS_JSON SSH_PRIVATE_KEY GHCR_TOKEN
+
 expected="$(printf '%s' "$SSH_HOST_FINGERPRINT" | tr -d '[:space:]')"
-scan="$(ssh-keyscan -T 10 "$SERVER_IP")"
+scan="$(ssh-keyscan -T 10 -p "$server_port" "$SERVER_IP" 2>/dev/null || true)"
 found=0
 while IFS= read -r line; do
   case "$line" in
@@ -53,7 +69,7 @@ while IFS= read -r line; do
   fi
 done <<< "$scan"
 if [ "$found" -ne 1 ]; then
-  echo "Host key does not match SSH_HOST_FINGERPRINT" >&2
+  echo "Host key of ${SERVER_IP}:${server_port} does not match SSH_HOST_FINGERPRINT" >&2
   exit 1
 fi
 
@@ -61,6 +77,7 @@ ssh_config="$ssh_dir/config"
 {
   echo "Host autodeploy-target"
   echo "  HostName ${SERVER_IP}"
+  echo "  Port ${server_port}"
   echo "  User ${SERVER_USER}"
   echo "  IdentityFile ${key_file}"
   echo "  IdentitiesOnly yes"
@@ -75,23 +92,18 @@ remote() {
   ssh -F "$ssh_config" autodeploy-target "$@"
 }
 
-PYTHONPATH="$tools_dir" python3 -m autodeploy.env_bundle "$bundle/.env.deploy"
+incoming="$APP_NAME/.autodeploy/incoming"
+remote "set -e; rm -rf \"\$HOME/$incoming\"; mkdir -p \"\$HOME/$incoming\"; chmod 700 \"\$HOME/$incoming\""
+scp -q -F "$ssh_config" "$bundle/.env" "$bundle/.env.deploy" "$bundle/docker-compose.prod.yml" \
+  "autodeploy-target:$incoming/"
+scp -q -F "$ssh_config" "$tools_dir/remote/deploy.sh" "autodeploy-target:$APP_NAME/.autodeploy/"
 
-remote "mkdir -p \"\$HOME/$APP_NAME/.autodeploy\""
-scp -F "$ssh_config" "$COMPOSE_FILE" "autodeploy-target:$APP_NAME/docker-compose.prod.yml"
-scp -F "$ssh_config" "$bundle/.env.deploy" "autodeploy-target:$APP_NAME/"
-scp -F "$ssh_config" "$tools_dir/remote/deploy.sh" "$tools_dir/remote/verify.sh" \
-  "autodeploy-target:$APP_NAME/.autodeploy/"
-
-remote "set -euo pipefail
-cd \"\$HOME/$APP_NAME\"
-chmod 600 .env.deploy
-trap 'rm -f .env.deploy' EXIT
-bash .autodeploy/deploy.sh
-bash .autodeploy/verify.sh
-"
+remote "bash \"\$HOME/$APP_NAME/.autodeploy/deploy.sh\""
 
 if [ -n "${POST_DEPLOY_SCRIPT:-}" ]; then
-  SSH_CONFIG="$ssh_config" SSH_TARGET=autodeploy-target bash "$POST_DEPLOY_SCRIPT" \
+  # Скрипту приложения — только то, что нужно для SSH, без секретов.
+  env -i PATH="$PATH" HOME="$HOME" APP_NAME="$APP_NAME" \
+    SSH_CONFIG="$ssh_config" SSH_TARGET=autodeploy-target \
+    bash "$POST_DEPLOY_SCRIPT" \
     || echo "Post-deploy script failed; the app is already deployed" >&2
 fi

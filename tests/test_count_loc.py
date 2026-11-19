@@ -54,3 +54,20 @@ def test_loc_line_shows_the_delta() -> None:
 def test_blank_previous_revision_is_ignored() -> None:
     assert git_rev_exists("") is False
     assert git_rev_exists("0" * 40) is False
+
+
+def test_hidden_directories_are_not_mistaken_for_docs() -> None:
+    assert not is_documentation_path(".docs/x.py")
+    assert not is_documentation_path(".github/workflows/ci.yml")
+    assert is_documentation_path("./docs/x.py")
+
+
+def test_lock_files_are_not_counted() -> None:
+    archive = _archive(
+        {
+            "main.py": b"a\n",
+            "poetry.lock": b"x\n" * 100,
+            "web/package-lock.json": b"{}\n" * 100,
+        }
+    )
+    assert count_loc_in_archive(archive) == 1

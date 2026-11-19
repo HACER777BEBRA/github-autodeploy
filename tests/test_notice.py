@@ -54,3 +54,11 @@ def test_url_quotes_are_escaped_in_the_link() -> None:
 
 def test_notice_is_skipped_without_sha() -> None:
     assert format_deploy_notice("  ", "локальный запуск", None) is None
+
+
+def test_long_commit_message_is_truncated_without_breaking_entities() -> None:
+    text = format_deploy_notice("abc1234", "<" * 5000, None)
+    assert text is not None
+    assert len(text) < 4096
+    assert "&lt;…" in text
+    assert "&l…" not in text

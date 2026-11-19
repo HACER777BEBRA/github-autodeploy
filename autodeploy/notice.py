@@ -1,4 +1,25 @@
 import html
+import os
+import sys
+
+# Telegram принимает до 4096 символов; остальная часть уведомления короткая.
+MAX_SUMMARY_CHARS = 3000
+
+
+def _escape_limited(text: str, limit: int) -> str:
+    """Экранирует текст и обрезает его, не разрывая HTML-сущности."""
+    escaped = html.escape(text)
+    if len(escaped) <= limit:
+        return escaped
+    parts: list[str] = []
+    size = 0
+    for char in text:
+        piece = html.escape(char)
+        if size + len(piece) > limit - 1:
+            break
+        parts.append(piece)
+        size += len(piece)
+    return "".join(parts).rstrip() + "…"
 
 
 def _stage(status: str | None, name: str) -> str:
@@ -32,7 +53,11 @@ def format_deploy_notice(
 
     name = (app or "").strip()
     target = f"Деплой {html.escape(name)}" if name else "Деплой"
-    if (test_status or "") == "success" and finished(build_status) and finished(deploy_status):
+    if (
+        (test_status or "") == "success"
+        and finished(build_status)
+        and finished(deploy_status)
+    ):
         emoji = "✅"
         title = f"{target} успешно завершен!"
         status_text = "Все этапы пройдены успешно"
@@ -54,7 +79,7 @@ def format_deploy_notice(
     ]
     summary = (message or "").strip()
     if summary:
-        parts.append(html.escape(summary))
+        parts.append(_escape_limited(summary, MAX_SUMMARY_CHARS))
     parts.append("")
     loc = (loc_line or "").strip()
     if loc:
@@ -62,14 +87,13 @@ def format_deploy_notice(
     parts.append(status_text)
     link = (url or "").strip()
     if link:
-        parts.append(f'<a href="{html.escape(link, quote=True)}">Проверить в Actions</a>')
+        parts.append(
+            f'<a href="{html.escape(link, quote=True)}">Проверить в Actions</a>'
+        )
     return "\n".join(parts)
 
 
 def main() -> int:
-    import os
-    import sys
-
     text = format_deploy_notice(
         os.environ.get("COMMIT_SHA"),
         os.environ.get("COMMIT_MESSAGE"),

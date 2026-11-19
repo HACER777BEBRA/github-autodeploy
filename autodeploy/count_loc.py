@@ -7,15 +7,48 @@ import sys
 import tarfile
 
 DOC_SUFFIXES = (".md", ".rst", ".adoc")
+# Сгенерированные файлы зависимостей, а не код.
+LOCK_FILES = frozenset(
+    {
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "bun.lock",
+        "poetry.lock",
+        "uv.lock",
+        "pipfile.lock",
+        "pdm.lock",
+        "cargo.lock",
+        "composer.lock",
+        "gemfile.lock",
+        "go.sum",
+    }
+)
 ZERO_SHA = "0" * 40
 
 
+def _normalize(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized.removeprefix("./")
+    return normalized
+
+
 def is_documentation_path(path: str) -> bool:
-    normalized = path.replace("\\", "/").lstrip("./")
+    normalized = _normalize(path)
     name = normalized.rsplit("/", 1)[-1].lower()
     if name.endswith(DOC_SUFFIXES):
         return True
     return normalized == "docs" or normalized.startswith("docs/")
+
+
+def is_lock_file(path: str) -> bool:
+    return _normalize(path).rsplit("/", 1)[-1].lower() in LOCK_FILES
+
+
+def is_counted_path(path: str) -> bool:
+    return not is_documentation_path(path) and not is_lock_file(path)
 
 
 def is_text_content(data: bytes) -> bool:
@@ -49,7 +82,7 @@ def count_loc_in_archive(archive: bytes) -> int:
     total = 0
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
         for member in tar.getmembers():
-            if not member.isfile() or is_documentation_path(member.name):
+            if not member.isfile() or not is_counted_path(member.name):
                 continue
             extracted = tar.extractfile(member)
             if extracted is None:

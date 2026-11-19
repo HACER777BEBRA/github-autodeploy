@@ -71,9 +71,11 @@ on:
         type: string
         default: ""
       notify_token_secret:
+        description: "Имя секрета с токеном Telegram-бота; пусто — без уведомлений"
         type: string
         default: BOT_TOKEN
       notify_chat_secret:
+        description: "Имя секрета с id чата для уведомлений; пусто — без уведомлений"
         type: string
         default: LOG_CHAT_ID
 
@@ -85,8 +87,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ inputs.python_version }}
       - name: Run tests
@@ -109,49 +111,70 @@ jobs:
     outputs:
       image: ${{ steps.push.outputs.image }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve image name
+        id: meta
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          image="${IMAGE_NAME:-ghcr.io/${REPOSITORY}}"
+          echo "image=${image,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.build_context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            autodeploy.app=${{ inputs.app_name }}
+          cache-from: type=gha,scope=${{ inputs.app_name }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.app_name }}
+      - name: Export image digest
         id: push
         env:
-          IMAGE_NAME: ${{ inputs.image_name }}
-          DOCKERFILE: ${{ inputs.dockerfile }}
-          BUILD_CONTEXT: ${{ inputs.build_context }}
-          REPOSITORY: ${{ github.repository }}
-          SHA: ${{ github.sha }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          set -euo pipefail
-          image="${IMAGE_NAME:-ghcr.io/${REPOSITORY}}"
-          image="${image,,}"
-          docker build -f "$DOCKERFILE" -t "${image}:${SHA}" "$BUILD_CONTEXT"
-          docker push "${image}:${SHA}"
-          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${image}:${SHA}")"
-          case "$digest" in
-            *@sha256:*) ;;
+          case "$DIGEST" in
+            sha256:*) ;;
             *) echo "Image digest was not published" >&2; exit 1 ;;
           esac
-          echo "image=${image}@${digest#*@}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
 
   deploy:
     name: Deploy to Server
     needs: [test, build-and-push]
     if: "!cancelled() && needs.build-and-push.result == 'success'"
     runs-on: ubuntu-latest
+    # Выкладки одного приложения идут по очереди: старая не перезапишет новую.
+    concurrency:
+      group: autodeploy-${{ github.repository }}-${{ inputs.app_name }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.autodeploy_repository }}
           ref: ${{ inputs.autodeploy_ref }}
           token: ${{ secrets.AUTODEPLOY_TOKEN || github.token }}
           path: .autodeploy
+          persist-credentials: false
       - name: Deploy via SSH
         env:
           SECRETS_JSON: ${{ toJSON(secrets) }}
@@ -169,6 +192,7 @@ jobs:
           POST_DEPLOY_SCRIPT: ${{ inputs.post_deploy_script }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_PORT: ${{ secrets.SERVER_PORT }}
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           SSH_HOST_FINGERPRINT: ${{ secrets.SSH_HOST_FINGERPRINT }}
         run: bash .autodeploy/scripts/push_remote.sh
@@ -178,22 +202,37 @@ jobs:
     needs: [test, build-and-push, deploy]
     if: >-
       always()
+      && inputs.notify_token_secret != ''
+      && inputs.notify_chat_secret != ''
       && github.event_name == 'push'
       && github.ref == format('refs/heads/{0}', inputs.deploy_branch)
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: actions/checkout@v7
+      - name: Check Telegram settings
+        id: check
+        env:
+          NOTIFY_TOKEN: ${{ secrets[inputs.notify_token_secret] }}
+          NOTIFY_CHAT_ID: ${{ secrets[inputs.notify_chat_secret] }}
+        run: |
+          if [ -n "$NOTIFY_TOKEN" ] && [ -n "$NOTIFY_CHAT_ID" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Telegram notification skipped: token or chat id is not set"
+          fi
+      - if: steps.check.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: steps.check.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.autodeploy_repository }}
           ref: ${{ inputs.autodeploy_ref }}
           token: ${{ secrets.AUTODEPLOY_TOKEN || github.token }}
           path: .autodeploy
+          persist-credentials: false
       - name: Send notification
+        if: steps.check.outputs.enabled == 'true'
         env:
           NOTIFY_TOKEN: ${{ secrets[inputs.notify_token_secret] }}
           NOTIFY_CHAT_ID: ${{ secrets[inputs.notify_chat_secret] }}
@@ -203,5 +242,5 @@ jobs:
           DEPLOY_STATUS: ${{ needs.deploy.result }}
           COMMIT_SHA: ${{ github.sha }}
           BEFORE_SHA: ${{ github.event.before }}
-          WORKFLOW_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash .autodeploy/scripts/notify.sh
