@@ -3,6 +3,26 @@ set -euo pipefail
 
 tools_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Пустые все SSH-секреты разом — почти всегда значит, что секреты вообще
+# не дошли до reusable workflow: `secrets: inherit` не работает между
+# разными владельцами репозиториев.
+if [ -z "${SERVER_IP:-}${SERVER_USER:-}${SSH_PRIVATE_KEY:-}${SSH_HOST_FINGERPRINT:-}" ]; then
+  caller_owner="${CALLER_REPOSITORY%%/*}"
+  workflow_owner="${AUTODEPLOY_REPOSITORY%%/*}"
+  {
+    echo "::error title=Secrets were not passed::SERVER_IP, SERVER_USER, SSH_PRIVATE_KEY and SSH_HOST_FINGERPRINT are all empty."
+    if [ -n "$caller_owner" ] && [ "${caller_owner,,}" != "${workflow_owner,,}" ]; then
+      echo "The app repository (${CALLER_REPOSITORY}) and autodeploy (${AUTODEPLOY_REPOSITORY}) have different owners."
+    fi
+    echo "GitHub passes 'secrets: inherit' only to a reusable workflow of the same owner (organization or enterprise)."
+    echo "If the workflow is called across owners, vendor it into the app repository and call it as"
+    echo "'uses: ./.github/workflows/autodeploy.yml' with 'autodeploy_ref' pinned to the same SHA."
+    echo "See https://github.com/${AUTODEPLOY_REPOSITORY:-HACER777BEBRA/github-autodeploy}#репозиторий-приложения-у-другого-владельца"
+    echo "Otherwise check that the secrets exist in the app repository (or its environment/organization)."
+  } >&2
+  exit 1
+fi
+
 for name in APP_NAME NEW_IMAGE GHCR_TOKEN GHCR_USERNAME COMPOSE_FILE \
   SERVER_IP SERVER_USER SSH_PRIVATE_KEY SSH_HOST_FINGERPRINT; do
   if [ -z "${!name:-}" ]; then
