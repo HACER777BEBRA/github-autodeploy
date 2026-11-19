@@ -19,13 +19,13 @@ on:
 
 jobs:
   autodeploy:
-    uses: OWNER/github-autodeploy/.github/workflows/deploy.yml@main
+    uses: HACER777BEBRA/github-autodeploy/.github/workflows/deploy.yml@main
     permissions:
       contents: read
       packages: write
     secrets: inherit
     with:
-      autodeploy_repository: OWNER/github-autodeploy
+      autodeploy_repository: HACER777BEBRA/github-autodeploy
       app_name: my-bot
       env_keys: BOT_TOKEN LOG_CHAT_ID DATABASE_URL
 ```
