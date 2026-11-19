@@ -190,6 +190,8 @@ jobs:
           READY_TIMEOUT: ${{ inputs.ready_timeout }}
           LOG_MASK_REGEX: ${{ inputs.log_mask_regex }}
           POST_DEPLOY_SCRIPT: ${{ inputs.post_deploy_script }}
+          AUTODEPLOY_REPOSITORY: ${{ inputs.autodeploy_repository }}
+          CALLER_REPOSITORY: ${{ github.repository }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
           SERVER_PORT: ${{ secrets.SERVER_PORT }}
@@ -220,6 +222,7 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "Telegram notification skipped: token or chat id is not set"
+            echo "(a caller from another owner gets no secrets via 'secrets: inherit', see README)"
           fi
       - if: steps.check.outputs.enabled == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

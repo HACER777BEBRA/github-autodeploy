@@ -32,6 +32,8 @@ jobs:
 
 Полный пример — `examples/real-estate-client-bot.yml`.
 
+Так подключается репозиторий того же владельца, что и `HACER777BEBRA/github-autodeploy`. Если приложение лежит у другого пользователя или в другой организации, `secrets: inherit` секреты не передаст — см. [Репозиторий приложения у другого владельца](#репозиторий-приложения-у-другого-владельца).
+
 2. Положить в репозиторий prod-compose (по умолчанию `docker-compose.prod.yml`). Требования:
    - `image: ${NEW_IMAGE:?image digest is required}`;
    - `container_name` равен `app_name`;
@@ -64,6 +66,47 @@ jobs:
 ### Версии
 
 Пример выше подключает `@main`. Чтобы выкладка не менялась сама, укажите тег или SHA и в `uses: ...@<ref>`, и в `autodeploy_ref` — так workflow и скрипты будут из одной версии.
+
+### Репозиторий приложения у другого владельца
+
+GitHub передаёт секреты по `secrets: inherit` только в reusable workflow того же владельца (того же пользователя, организации или enterprise). Если приложение лежит, например, в `someone/app`, а workflow вызывается как `HACER777BEBRA/github-autodeploy/.github/workflows/deploy.yml@...`, все секреты внутри приходят пустыми:
+
+- выкладка падает с ошибкой `Secrets were not passed` (в старых версиях — `Missing required environment variable: SERVER_IP`);
+- уведомление в Telegram пропускается: токен и id чата тоже пусты.
+
+Явная передача (`secrets: { SERVER_IP: ..., ... }` вместо `inherit`) здесь целиком не помогает: GitHub принимает только секреты, объявленные в `on.workflow_call.secrets` вызываемого workflow, а имена из `env_keys` и `notify_*_secret` у каждого приложения свои, заранее их не объявить. Поэтому workflow библиотеки секреты не объявляет и рассчитан на `inherit`.
+
+Обход — положить копию workflow в репозиторий приложения и вызывать её локально: вызов `./...` идёт внутри одного репозитория, и `inherit` работает.
+
+1. Скопировать `deploy.yml` нужной версии (SHA или тег) под другим именем, чтобы не путать с вызывающим workflow:
+
+   ```bash
+   SHA=<sha коммита github-autodeploy>
+   curl -fsSL "https://raw.githubusercontent.com/HACER777BEBRA/github-autodeploy/$SHA/.github/workflows/deploy.yml" -o .github/workflows/autodeploy.yml
+   ```
+
+   У копии только `on: workflow_call`, сама по себе она не запускается.
+
+2. В `.github/workflows/deploy.yml` приложения вызывать копию и закрепить скрипты на тот же SHA:
+
+   ```yaml
+   jobs:
+     autodeploy:
+       uses: ./.github/workflows/autodeploy.yml
+       permissions:
+         contents: read
+         packages: write
+       secrets: inherit
+       with:
+         autodeploy_repository: HACER777BEBRA/github-autodeploy
+         autodeploy_ref: <тот же SHA>
+         app_name: my-bot
+         env_keys: BOT_TOKEN LOG_CHAT_ID DATABASE_URL
+   ```
+
+3. Обновляться так же парой: перекачать `autodeploy.yml` с нового SHA и поменять `autodeploy_ref` в одном коммите. Иначе workflow и скрипты окажутся из разных версий.
+
+Скрипты (`scripts/`, `remote/`) по-прежнему берутся из этого репозитория через `autodeploy_repository`/`autodeploy_ref`; для этого секреты не нужны, пока репозиторий публичный.
 
 ## Параметры
 
